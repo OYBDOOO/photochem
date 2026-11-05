@@ -194,6 +194,8 @@ module photochem_data
     ! radiative transfer
     integer :: nw !! Number of wavelength bins.
     real(dp), allocatable :: wavl(:) !! Wavelength-bin edges in nm, shape (nw+1).
+    logical :: lya_line_center = .false. !! If true, the Lyman alpha bin uses cross sections at the line center.
+    integer :: lya_bin = 0 !! Index of the bin that contains Lyman alpha if `lya_line_center`, otherwise 0.
     type(XsectionData), allocatable :: absorp_xs(:) !! Contains photoabsorption species
     real(dp), allocatable :: photolysis_xs(:,:) !! (kj,nw) The xs time qy for each photolysis reaction
     integer :: nray !! number of species with rayleigh scattering
@@ -295,6 +297,7 @@ contains
     dat%planet_mass = settings%planet_mass
     dat%planet_radius = settings%planet_radius
     dat%H_escape_type = settings%H_escape_type
+    dat%lya_line_center = settings%lya_line_center
     if (dat%H_escape_type /= NoHydrogenEscape) then
       ind = findloc(dat%species_names, 'H2')
       dat%LH2 = ind(1)
@@ -2093,6 +2096,7 @@ contains
 
   subroutine get_wavl(dat, data_dir, err)
     use h5fortran
+    use photochem_const, only: lyman_alpha_wavelength
     type(PhotochemData), intent(inout) :: dat
     character(len=*), intent(in) :: data_dir
     character(:), allocatable, intent(out) :: err
@@ -2100,6 +2104,7 @@ contains
     type(hdf5_file) :: h
     integer(HSIZE_T), allocatable :: dims(:)
     character(:), allocatable :: xsroot, filename
+    integer :: i
 
     ! Root directory
     xsroot = trim(data_dir)//"/xsections/"
@@ -2123,6 +2128,21 @@ contains
     dat%nw = size(dat%wavl) - 1
 
     call h%close()
+
+    ! The bin that contains Lyman alpha
+    dat%lya_bin = 0
+    if (dat%lya_line_center) then
+      do i = 1,dat%nw
+        if (dat%wavl(i) <= lyman_alpha_wavelength .and. lyman_alpha_wavelength < dat%wavl(i+1)) then
+          dat%lya_bin = i
+          exit
+        endif
+      enddo
+      if (dat%lya_bin == 0) then
+        err = '"lyman-alpha-line-center" is true, but no wavelength bin of "'//filename//'" contains Lyman alpha.'
+        return
+      endif
+    endif
 
   end subroutine
 
@@ -2346,8 +2366,11 @@ contains
       ! Skip the gases without opacities
       if (.not. is_hdf5(filename)) cycle
 
-      dat%absorp_xs(k) = create_XsectionData(filename, j, dat%wavl, err)
+      dat%absorp_xs(k) = create_XsectionData(filename, j, dat%wavl, err, lya_bin=dat%lya_bin)
       if (allocated(err)) return
+      ! Atomic H's own Lyman alpha line is ~100 times narrower than the stellar line and scatters
+      ! rather than absorbs, so the line's photons pass it: no H absorption in the Lyman alpha bin.
+      if (dat%lya_bin > 0 .and. species == 'H') dat%absorp_xs(k)%xs(dat%lya_bin) = tiny(1.0_dp)
 
       k = k + 1
     enddo
@@ -2368,14 +2391,16 @@ contains
       ! Filename is based on the species
       filename = xsroot//species//'.h5'
 
-      call get_photolysis_xs_for_reaction(filename, reaction_equation, dat%wavl, dat%photolysis_xs(i,:), err)
+      call get_photolysis_xs_for_reaction(filename, reaction_equation, dat%wavl, dat%photolysis_xs(i,:), err, &
+                                          lya_bin=dat%lya_bin)
       if (allocated(err)) return
 
     enddo
 
   end subroutine
 
-  subroutine get_photolysis_xs_for_reaction(filename, reaction_equation, wavl, xs, err)
+  subroutine get_photolysis_xs_for_reaction(filename, reaction_equation, wavl, xs, err, lya_bin)
+    use photochem_const, only: lyman_alpha_wavelength
     use futils, only: interp
     use h5fortran
     use futils, only: interp_discrete_to_bins
@@ -2385,10 +2410,12 @@ contains
     real(dp), intent(in) :: wavl(:)
     real(dp), intent(out) :: xs(:)
     character(:), allocatable, intent(out) :: err
+    integer, optional, intent(in) :: lya_bin !! If > 0, this bin gets the cross section and yield at Lyman alpha
 
     type(hdf5_file), target :: h
     integer(HSIZE_T), allocatable :: dims(:)
     real(dp), allocatable :: wv_tmp(:), xs_tmp(:), wv1(:), qy1(:), qy2(:), wv_av(:)
+    real(dp) :: qy_lya(1)
     integer :: ierr
     character(:), allocatable :: err_base, photo_type
 
@@ -2483,11 +2510,24 @@ contains
     ! Multiply the photolysis cross section by the yield.
     xs = xs*qy2
 
+    ! Lyman alpha bin: the cross section and yield at the line center replace the bin means
+    if (present(lya_bin)) then
+      if (lya_bin > 0) then
+        call interp([lyman_alpha_wavelength], wv1, qy1, qy_lya, ierr=ierr)
+        if (ierr /= 0) then
+          err = err_base//'Subroutine "interp" returned an error.'
+          return
+        endif
+        xs(lya_bin) = value_at_wavelength(lyman_alpha_wavelength, wv_tmp, xs_tmp, tiny(1.0_dp))*qy_lya(1)
+      endif
+    endif
+
     end block
 
   end subroutine
 
-  function create_XsectionData(filename, sp_ind, wavl, err) result(xs)
+  function create_XsectionData(filename, sp_ind, wavl, err, lya_bin) result(xs)
+    use photochem_const, only: lyman_alpha_wavelength
     use h5fortran
     use clima_useful, only: hdf5_file_closer
     use futils, only: interp_discrete_to_bins
@@ -2495,6 +2535,7 @@ contains
     integer, intent(in) :: sp_ind
     real(dp), intent(in) :: wavl(:)
     character(:), allocatable, intent(out) :: err
+    integer, optional, intent(in) :: lya_bin !! If > 0, this bin gets the cross section at Lyman alpha
     type(XsectionData) :: xs
 
     type(hdf5_file), target :: h
@@ -2531,8 +2572,42 @@ contains
     call interp_discrete_to_bins(wavl, wv_tmp, xs_tmp, xs%xs, 'FillValue', tiny(1.0_dp), err)
     if (allocated(err)) return
 
+    ! Lyman alpha bin: the cross section at the line center replaces the bin mean
+    if (present(lya_bin)) then
+      if (lya_bin > 0) xs%xs(lya_bin) = value_at_wavelength(lyman_alpha_wavelength, wv_tmp, xs_tmp, tiny(1.0_dp))
+    endif
+
     end block
 
+  end function
+
+  !> Linear interpolation of tabulated data at one wavelength, `fill_value` outside the data
+  !> (as `interp_discrete_to_bins` with 'FillValue').
+  pure function value_at_wavelength(wv0, wv, val, fill_value) result(res)
+    real(dp), intent(in) :: wv0 !! Wavelength (nm)
+    real(dp), intent(in) :: wv(:) !! Data wavelengths (nm), strictly increasing
+    real(dp), intent(in) :: val(:) !! Data values, same shape as `wv`
+    real(dp), intent(in) :: fill_value !! Value outside the data
+    real(dp) :: res
+
+    integer :: i
+
+    if (size(wv) == 0) then
+      res = fill_value
+      return
+    endif
+    if (wv0 < wv(1) .or. wv0 > wv(size(wv))) then
+      res = fill_value
+      return
+    endif
+    if (size(wv) == 1) then
+      res = val(1)
+      return
+    endif
+    do i = 1,size(wv)-2
+      if (wv0 <= wv(i+1)) exit
+    enddo
+    res = val(i) + (val(i+1) - val(i))*(wv0 - wv(i))/(wv(i+1) - wv(i))
   end function
 
   subroutine validate_mie_dataset(values, dataset, filename, lower_bound, &

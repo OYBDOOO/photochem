@@ -15,6 +15,7 @@ module photochem_const
   real(dp), parameter :: c_light = 299792458.0_dp !! Speed of light (m / s)
   real(dp), parameter :: N_avo = 6.02214076e23_dp !! Avagadros number
   real(dp), parameter :: pi = 3.14159265358979323846e0_dp
+  real(dp), parameter :: lyman_alpha_wavelength = 121.567_dp !! Center of the hydrogen Lyman alpha line (nm)
 
   real(dp), parameter :: smallest_real = tiny(1.0_dp)
   real(dp), parameter :: smaller_real = tiny(1.0_dp)**0.5_dp

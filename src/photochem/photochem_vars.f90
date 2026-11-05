@@ -517,6 +517,7 @@ contains
     allocate(var%photon_flux(dat%nw))
     call read_stellar_flux(flux_file, dat%nw, dat%wavl, var%photon_flux, err)
     if (allocated(err)) return
+    if (dat%lya_bin > 0) call check_lya_line_fraction(dat, var)
 
     call allocate_model_grid(dat, var)
   end function
@@ -650,6 +651,27 @@ contains
 
     if (dat%reverse) allocate(var%gibbs_energy(var%nz,dat%ng))
 
+  end subroutine
+
+  !> Warn if the Lyman alpha line does not carry nearly all photons of its bin, which
+  !> "lyman-alpha-line-center" assumes. The continuum is estimated from the fainter neighbouring bin.
+  subroutine check_lya_line_fraction(dat, var)
+    type(PhotochemData), intent(in) :: dat
+    type(PhotochemVars), intent(in) :: var
+
+    integer :: l
+    real(dp) :: continuum, line_fraction
+
+    l = dat%lya_bin
+    if (l <= 1 .or. l >= dat%nw) return
+    if (var%photon_flux(l) <= 0.0_dp) return
+    continuum = min(var%photon_flux(l-1)/(dat%wavl(l) - dat%wavl(l-1)), &
+                    var%photon_flux(l+1)/(dat%wavl(l+2) - dat%wavl(l+1)))*(dat%wavl(l+1) - dat%wavl(l))
+    line_fraction = max(1.0_dp - continuum/var%photon_flux(l), 0.0_dp)
+    if (line_fraction < 0.9_dp .and. var%verbose > 0) then
+      print'(a,f5.3,a)', 'Warning: the Lyman alpha line carries only ', line_fraction, &
+        ' of the photons in its bin; "lyman-alpha-line-center" assumes it carries nearly all of them.'
+    endif
   end subroutine
 
   subroutine read_stellar_flux(star_file, nw, wavl, photon_flux, err)

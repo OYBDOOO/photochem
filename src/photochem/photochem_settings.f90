@@ -48,6 +48,7 @@ module photochem_settings
     real(dp) :: surface_albedo
     real(dp) :: photon_scale_factor
     real(dp) :: solar_zenith
+    logical :: lya_line_center = .false. !! The Lyman alpha bin uses cross sections at the line center
     integer :: H_escape_type
     real(dp), allocatable :: H_escape_S1
     integer :: default_lowerboundcond
@@ -168,6 +169,12 @@ contains
       err = 'IOError: solar zenith must be between 0 and 90.'
       return
     endif
+    ! Optional. In the wavelength bin that contains Lyman alpha, take every cross section at the
+    ! line center (121.567 nm) instead of the bin mean. The line carries nearly all of the bin's
+    ! photons for the Sun and cooler stars, while the bin mean of O2 is ~5-9 times its value in the line.
+    ! Atomic H, whose own Lyman alpha line is a narrow resonance that scatters, does not absorb there.
+    s%lya_line_center = dict%get_logical('lyman-alpha-line-center', default=.false., error=io_err)
+    if (allocated(io_err)) then; err = trim(filename)//trim(io_err%message); return; endif
 
     obsolete_node => dict%get('evolve-climate')
     if (associated(obsolete_node)) then

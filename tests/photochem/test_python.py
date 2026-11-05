@@ -1553,9 +1553,45 @@ def test_custom_optical_properties():
     assert np.all(no_particles.wrk.tauc > 0.0)
 
 
+def test_lyman_alpha_line_center():
+    """`lyman-alpha-line-center` takes the cross sections of the bin that holds Lyman alpha at 121.567 nm."""
+    text = Path(fixture_file("settings.yaml")).read_text()
+    assert "\nplanet:\n" in text
+    models = []
+    with tempfile.TemporaryDirectory() as tmp:
+        settings_lya = Path(tmp) / "settings_lya.yaml"
+        settings_lya.write_text(text.replace("\nplanet:\n", "\nplanet:\n  lyman-alpha-line-center: true\n", 1))
+        for settings in (fixture_file("settings.yaml"), str(settings_lya)):
+            pc = EvoAtmosphere(zahnle_earth, settings, fixture_file("sun.txt"), fixture_file("atmosphere.txt"))
+            pc.var.verbose = 0
+            pc.prep_atmosphere(pc.wrk.usol)
+            models.append(pc)
+    off, on = models
+    wavl = np.array(off.dat.wavl)
+    ilya = int(np.searchsorted(wavl, 121.567)) - 1
+    assert wavl[ilya] <= 121.567 < wavl[ilya + 1]
+
+    # Only the Lyman alpha bin changes
+    tau_off, tau_on = np.array(off.wrk.optical_depth), np.array(on.wrk.optical_depth)
+    others = np.arange(tau_off.shape[1]) != ilya
+    assert np.array_equal(tau_off[:, others], tau_on[:, others])
+
+    # The bin mean of O2 is ~5 times its value at the line, so the O2-dominated upper layers are several
+    # times more transparent at Lyman alpha and H2O photolysis reaches deeper.
+    ratio = tau_on[:, ilya] / tau_off[:, ilya]
+    assert ratio.min() < 0.3 and ratio.max() < 1.05
+    eqs = list(off.dat.reaction_equations)
+    k = [n for n, i in enumerate(np.array(off.dat.photonums)) if eqs[int(i) - 1].replace(" ", "").startswith("H2O+hv")]
+    assert len(k) > 0
+    j_off = np.array(off.wrk.prates)[:, k].sum(1)
+    j_on = np.array(on.wrk.prates)[:, k].sum(1)
+    assert np.max(j_on / j_off) > 1.5
+
+
 def main():
 
     test_custom_optical_properties()
+    test_lyman_alpha_line_center()
     test_package_version_ownership()
     test_runtime_data_defaults()
     test_packaged_solar_spectrum()
